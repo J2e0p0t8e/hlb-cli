@@ -308,6 +308,13 @@ async function runAgent(challengeId, agentCmd, agentArgs) {
             agentArgs.push('--dangerously-skip-permissions');
         }
 
+        // Pour agy en mode -p / --print, on augmente le timeout par défaut (5m -> 15m) pour laisser le temps de résoudre
+        if (agentCmd === 'agy' && (agentArgs.includes('-p') || agentArgs.includes('--print') || agentArgs.includes('--prompt'))) {
+            if (!agentArgs.includes('--print-timeout')) {
+                agentArgs.push('--print-timeout', '15m');
+            }
+        }
+
         const hasPromptArg = agentArgs.some(arg => arg.includes('{PROMPT}'));
         const finalArgs = agentArgs.map(arg => arg.replace('{PROMPT}', promptTemplate));
 
