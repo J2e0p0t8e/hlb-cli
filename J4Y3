@@ -147,14 +147,15 @@ async function loadWriteupFromDB(challengeId) {
 }
 
 const getHeaders = () => ({
-    'Authorization': `Token ${API_TOKEN}`,
+    'Authorization': `Token ${(API_TOKEN || '').trim()}`,
     'Content-Type': 'application/json',
     'Accept': 'application/json'
 });
 
 async function submitFlag(challengeId, flag) {
     try {
-        const res = await fetch(`${URL}/api/v1/challenges/attempt`, {
+        const cleanUrl = (URL || 'https://ctf.hackerlab.bj').replace(/\/+$/, '');
+        const res = await fetch(`${cleanUrl}/api/v1/challenges/attempt`, {
             method: 'POST',
             headers: getHeaders(),
             body: JSON.stringify({ challenge_id: challengeId, submission: flag })
@@ -188,7 +189,8 @@ async function submitFlag(challengeId, flag) {
 
 async function mapMissions() {
     try {
-        const res = await fetch(`${URL}/api/v1/challenges`, { headers: getHeaders() });
+        const cleanUrl = (URL || 'https://ctf.hackerlab.bj').replace(/\/+$/, '');
+        const res = await fetch(`${cleanUrl}/api/v1/challenges`, { headers: getHeaders() });
         if (!res.ok) {
             console.error(`Erreur HTTP: ${res.status}`);
             return;
@@ -216,11 +218,16 @@ async function mapMissions() {
 
 async function getMissionDetails(challengeId) {
     try {
-        const res = await fetch(`${URL}/api/v1/challenges/${challengeId}`, { headers: getHeaders() });
-        if (!res.ok) return null;
+        const cleanUrl = (URL || 'https://ctf.hackerlab.bj').replace(/\/+$/, '');
+        const res = await fetch(`${cleanUrl}/api/v1/challenges/${challengeId}`, { headers: getHeaders() });
+        if (!res.ok) {
+            console.error(`\x1b[31m[hlb]\x1b[0m Erreur CTFd (HTTP ${res.status}) — Vérifiez votre token CTF`);
+            return null;
+        }
         const data = await res.json();
         return data.success ? data.data : null;
     } catch (err) {
+        console.error(`\x1b[31m[hlb]\x1b[0m Erreur réseau : ${err.message}`);
         return null;
     }
 }
