@@ -37,12 +37,19 @@ if (fs.existsSync(configPath)) {
 let LICENCE_KEY = config.licence_key || null;
 const API_LICENCE_URL = 'https://hlb-cli-api-eight.vercel.app';
 
+function getHardwareId() {
+    const crypto = require('crypto');
+    const raw = `${os.hostname()}-${os.userInfo().username}-${os.homedir()}`;
+    return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
+}
+
 async function verifyLicence(key) {
     try {
+        const hardware_id = getHardwareId();
         const res = await fetch(`${API_LICENCE_URL}/api/verify`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key }),
+            body: JSON.stringify({ key, hardware_id }),
             signal: AbortSignal.timeout(8000)
         });
         if (!res.ok) {
