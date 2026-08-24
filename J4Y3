@@ -511,6 +511,8 @@ async function startShell() {
     
     if (!URL) URL = "https://ctf.hackerlab.bj";
 
+    const ask = (q) => new Promise(resolve => rl.question(q, resolve));
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ÉTAPE 1 : VÉRIFICATION DE LICENCE
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -518,10 +520,7 @@ async function startShell() {
         console.log("\x1b[35m┌──────────────────────────────────────────────┐\x1b[0m");
         console.log("\x1b[35m│    WhY_N07_Gh05T — Activation de licence       │\x1b[0m");
         console.log("\x1b[35m└──────────────────────────────────────────────┘\x1b[0m\n");
-        const rlInit = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const ask = (q) => new Promise(resolve => rlInit.question(q, resolve));
         LICENCE_KEY = await ask("Clé de licence (hlb-xxxx-xxxx-xxxx) : ");
-        rlInit.close();
         LICENCE_KEY = LICENCE_KEY.trim();
     }
 
@@ -553,12 +552,9 @@ async function startShell() {
     
     // Récupérer le Personal Access Token CTF si pas encore renseigné
     if (!API_TOKEN) {
-        const rlInit2 = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const ask2 = (q) => new Promise(resolve => rlInit2.question(q, resolve));
         console.log(`\n\x1b[32m✅ Licence valide — Bienvenue ${licResult.owner} !\x1b[0m\n`);
-        API_TOKEN = await ask2("Clé d'accès CTF (Personal Access Token) : ");
-        config.token = API_TOKEN;
-        rlInit2.close();
+        API_TOKEN = await ask("Clé d'accès CTF (Personal Access Token) : ");
+        config.token = API_TOKEN.trim();
     }
 
     // Récupérer la DATABASE_URL depuis la config API (si fournie par le serveur)
