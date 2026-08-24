@@ -400,14 +400,58 @@ async function runAgent(challengeId, agentCmd, agentArgs) {
     });
 }
 
+async function handleAdminLicence(secret, action, arg1) {
+    try {
+        const body = { admin_secret: secret, action };
+        if (action === 'create') body.owner = arg1 || 'anonymous';
+        if (action === 'revoke' || action === 'activate') body.key = arg1;
+
+        const res = await fetch(`${API_LICENCE_URL}/api/revoke`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            console.error(`\x1b[31m[hlb admin]\x1b[0m Erreur : ${data.error || res.statusText}`);
+            return;
+        }
+
+        if (action === 'create') {
+            console.log(`\n\x1b[32m[hlb admin] ✅ Nouvelle licence créée avec succès !\x1b[0m`);
+            console.log(`👤 Propriétaire : \x1b[1m${data.owner}\x1b[0m`);
+            console.log(`🔑 Clé de licence : \x1b[33m${data.key}\x1b[0m\n`);
+        } else if (action === 'list') {
+            console.log(`\n=== 📋 Liste des Licences WhY_N07_Gh05T ===`);
+            console.log("Clé\t\t\t\tStatut\tPropriétaire\tDernière activité");
+            console.log("-".repeat(70));
+            data.licences.forEach(lic => {
+                const status = lic.active ? '\x1b[32mACTIVE\x1b[0m' : '\x1b[31mRÉVOQUÉE\x1b[0m';
+                const lastSeen = lic.last_seen ? new Date(lic.last_seen).toLocaleString() : 'Jamais';
+                console.log(`${lic.key}\t${status}\t${(lic.owner || '').padEnd(15)}\t${lastSeen}`);
+            });
+            console.log("-".repeat(70) + "\n");
+        } else if (action === 'revoke' || action === 'activate') {
+            console.log(`\n\x1b[32m[hlb admin] ✅ ${data.message}\x1b[0m\n`);
+        }
+    } catch(err) {
+        console.error(`\x1b[31m[hlb admin]\x1b[0m Erreur réseau : ${err.message}`);
+    }
+}
+
 function printHelp() {
     console.log(`
 Commandes disponibles:
-  map                               Affiche toutes les missions
-  submit <id> <flag>                Soumet un flag pour une mission
-  agent <id> <commande> [args...]   Lance un agent IA pour résoudre la mission
-  help                              Affiche ce message d'aide
-  exit / quit                       Quitter l'outil interactif
+  map                                       Affiche toutes les missions
+  submit <id> <flag>                        Soumet un flag pour une mission
+  agent <id> <commande> [args...]           Lance un agent IA pour résoudre la mission
+  licence create <secret> <nom_du_pote>     [Admin] Génère une nouvelle clé de licence
+  licence list <secret>                     [Admin] Liste toutes les licences et connexions
+  licence revoke <secret> <cle_hlb>         [Admin] Révoque/Bloque une licence
+  licence activate <secret> <cle_hlb>       [Admin] Réactive une licence révoquée
+  help                                      Affiche ce message d'aide
+  exit / quit                               Quitter l'outil interactif
 `);
 }
 
@@ -588,6 +632,20 @@ rl.on('line', async (line) => {
             break;
         case 'map':
             await mapMissions();
+            break;
+        case 'licence':
+            if (args.length < 3) {
+                console.error("Usage: licence <create|list|revoke|activate> <secret> [nom_du_pote|cle_hlb]");
+            } else {
+                const subAction = args[1].toLowerCase();
+                const secret = args[2];
+                const target = args.slice(3).join(' ');
+                if (!['create', 'list', 'revoke', 'activate'].includes(subAction)) {
+                    console.error("Action inconnue. Choix possibles : create, list, revoke, activate");
+                } else {
+                    await handleAdminLicence(secret, subAction, target);
+                }
+            }
             break;
         case 'help':
             printHelp();
