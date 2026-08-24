@@ -1,0 +1,613 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const dotenv = require('dotenv');
+const readline = require('readline');
+const dns = require('dns');
+try { dns.setDefaultResultOrder('ipv4first'); } catch(e) {}
+
+// Chercher le .env dans le répertoire courant, puis le fallback
+let envPath = path.join(process.cwd(), '.env');
+if (!fs.existsSync(envPath)) {
+    envPath = path.join(__dirname, '..', '.env');
+}
+if (!fs.existsSync(envPath)) {
+    envPath = path.join(__dirname, '.env');
+}
+dotenv.config({ path: envPath });
+
+let API_TOKEN = process.env.HACKERLAB_API_TOKEN;
+let URL = process.env.HACKERLAB_URL;
+let DATABASE_URL = process.env.DATABASE_URL;
+
+const os = require('os');
+const configPath = path.join(os.homedir(), '.hlb-config.json');
+
+let config = {};
+if (fs.existsSync(configPath)) {
+    try {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        if (!API_TOKEN && config.token) API_TOKEN = config.token;
+        if (!URL && config.url) URL = config.url;
+        if (!DATABASE_URL && config.database_url) DATABASE_URL = config.database_url;
+    } catch(e) {}
+}
+
+// Clé de licence & config système chargée depuis l'API
+let LICENCE_KEY = config.licence_key || null;
+const API_LICENCE_URL = 'https://hlb-cli-api-eight.vercel.app';
+
+async function verifyLicence(key) {
+    try {
+        const res = await fetch(`${API_LICENCE_URL}/api/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key }),
+            signal: AbortSignal.timeout(8000)
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            return { valid: false, error: err.error || `HTTP ${res.status}` };
+        }
+        return await res.json();
+    } catch(e) {
+        return { valid: false, error: `Impossible de contacter le serveur de licences : ${e.message}` };
+    }
+}
+
+// Client PostgreSQL partagé pour la team
+let db = null;
+function loadDBModule() {
+    try {
+        const ws = require('ws');
+        const { Pool, neonConfig } = require('@neondatabase/serverless');
+        class IPv4WebSocket extends ws {
+            constructor(address, protocols, options) {
+                super(address, protocols, { ...options, family: 4 });
+            }
+        }
+        neonConfig.webSocketConstructor = IPv4WebSocket;
+        neonConfig.useSecureWebSocket = true;
+        return { Pool, isServerless: true };
+    } catch(e) {}
+
+    try { return { Pool: require('pg').Pool, isServerless: false }; } catch(e) {}
+
+    const globalPaths = [
+        '/home/ahiffon/.npm-global/lib/node_modules/pg',
+        '/usr/lib/node_modules/pg',
+        '/usr/local/lib/node_modules/pg',
+    ];
+    for (const p of globalPaths) {
+        try { return { Pool: require(p).Pool, isServerless: false }; } catch(e) {}
+    }
+    return null;
+}
+
+async function getDB() {
+    if (!DATABASE_URL) return null;
+    if (db) return db;
+    try {
+        const dbModule = loadDBModule();
+        if (!dbModule) throw new Error('module pg/@neondatabase/serverless introuvable');
+        if (dbModule.isServerless) {
+            db = new dbModule.Pool({ connectionString: DATABASE_URL });
+        } else {
+            db = new dbModule.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+        }
+        return db;
+    } catch(e) {
+        console.error(`\x1b[33m[hlb]\x1b[0m BD non disponible : ${e.message}`);
+        return null;
+    }
+}
+
+async function saveWriteupToDB(challengeId, missionData, content) {
+    const pool = await getDB();
+    if (!pool) return false;
+    try {
+        const flag = (content.match(/HACKERLAB\{[^}]+\}/) || [''])[0];
+        await pool.query(`
+            INSERT INTO writeups (challenge_id, challenge_name, category, author, flag, content)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        `, [
+            challengeId,
+            missionData?.name || `Mission ${challengeId}`,
+            missionData?.category || 'unknown',
+            os.userInfo().username,
+            flag,
+            content
+        ]);
+        return true;
+    } catch(e) {
+        console.error(`\x1b[33m[hlb]\x1b[0m Erreur sauvegarde BD : ${e.message}`);
+        return false;
+    }
+}
+
+async function loadWriteupFromDB(challengeId) {
+    const pool = await getDB();
+    if (!pool) return null;
+    try {
+        const res = await pool.query(
+            'SELECT content, challenge_name, author, created_at FROM writeups WHERE challenge_id = $1 ORDER BY created_at ASC',
+            [challengeId]
+        );
+        return res.rows.length > 0 ? res.rows : null;
+    } catch(e) {
+        return null;
+    }
+}
+
+const getHeaders = () => ({
+    'Authorization': `Token ${API_TOKEN}`,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+});
+
+async function submitFlag(challengeId, flag) {
+    try {
+        const res = await fetch(`${URL}/api/v1/challenges/attempt`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ challenge_id: challengeId, submission: flag })
+        });
+        
+        if (!res.ok) {
+            console.error(`Erreur HTTP: ${res.status}`);
+            return;
+        }
+
+        const data = await res.json();
+        console.log("\n=== Résultat de la soumission ===");
+        if (data.success) {
+            if (data.data.status === 'correct') {
+                console.log("✅ FLAG CORRECT ! Félicitations !");
+            } else if (data.data.status === 'incorrect') {
+                console.log("❌ Flag incorrect. Réessaie !");
+            } else if (data.data.status === 'already_solved') {
+                console.log("⚠️ Tu as déjà validé cette mission.");
+            } else {
+                console.log("Résultat:", data.data.status, data.data.message);
+            }
+        } else {
+            console.error("Erreur:", data.message || data);
+        }
+        console.log("=================================\n");
+    } catch (err) {
+        console.error("Erreur lors de la soumission du flag:", err.message);
+    }
+}
+
+async function mapMissions() {
+    try {
+        const res = await fetch(`${URL}/api/v1/challenges`, { headers: getHeaders() });
+        if (!res.ok) {
+            console.error(`Erreur HTTP: ${res.status}`);
+            return;
+        }
+        
+        const data = await res.json();
+        if (data.success) {
+            console.log("\n=== Cartographie des Missions ===");
+            console.log("ID\tStatus\tCatégorie\tNom de la mission");
+            console.log("-".repeat(60));
+            
+            data.data.forEach(ch => {
+                const isSolved = ch.solved_by_me ? '✅' : '❌';
+                console.log(`${ch.id}\t${isSolved}\t${ch.category.padEnd(15)}\t${ch.name}`);
+            });
+            console.log("-".repeat(60));
+            console.log(`Total: ${data.data.length} missions.\n`);
+        } else {
+            console.error("Erreur API:", data.message || data);
+        }
+    } catch (err) {
+        console.error("Erreur lors de la cartographie:", err.message);
+    }
+}
+
+async function getMissionDetails(challengeId) {
+    try {
+        const res = await fetch(`${URL}/api/v1/challenges/${challengeId}`, { headers: getHeaders() });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data.success ? data.data : null;
+    } catch (err) {
+        return null;
+    }
+}
+
+async function apiSubmitFlag(challengeId, flag) {
+    try {
+        const res = await fetch(`${URL}/api/v1/challenges/attempt`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ challenge_id: challengeId, submission: flag })
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        if (data.success && (data.data.status === 'correct' || data.data.status === 'already_solved')) {
+            return true;
+        }
+        return false;
+    } catch (err) {
+        return false;
+    }
+}
+
+const { spawn } = require('child_process');
+
+async function runAgent(challengeId, agentCmd, agentArgs) {
+    return new Promise(async (resolve) => {
+        let linkedWriteups = "";
+        const linkIndex = agentArgs.indexOf('--link');
+        if (linkIndex !== -1 && agentArgs.length > linkIndex + 1) {
+            const linkedIds = agentArgs[linkIndex + 1].split(',');
+            agentArgs.splice(linkIndex, 2); // On retire l'argument pour ne pas casser l'agent
+            
+            for (const id of linkedIds) {
+                const trimId = id.trim();
+                // 1. Chercher en BD (source partagée de la team)
+                const rows = await loadWriteupFromDB(parseInt(trimId));
+                if (rows) {
+                    console.log(`\x1b[36m[hlb]\x1b[0m 📂 Mission ${trimId} : ${rows.length} writeup(s) chargé(s) depuis la BD.`);
+                    rows.forEach((row, i) => {
+                        linkedWriteups += `\n--- DEBUT ARCHIVE MISSION ${trimId} [v${i+1} — par ${row.author} le ${new Date(row.created_at).toLocaleDateString()}] ---\n${row.content}\n--- FIN ARCHIVE MISSION ${trimId} [v${i+1}] ---\n`;
+                    });
+                } else {
+                    // 2. Fallback local
+                    const filepath = path.join(process.cwd(), `Writeup_Mission_${trimId}.md`);
+                    if (fs.existsSync(filepath)) {
+                        console.log(`\x1b[33m[hlb]\x1b[0m 📂 Archive mission ${trimId} chargée depuis le disque local.`);
+                        const content = fs.readFileSync(filepath, 'utf8');
+                        linkedWriteups += `\n--- DEBUT ARCHIVE MISSION ${trimId} ---\n${content}\n--- FIN ARCHIVE MISSION ${trimId} ---\n`;
+                    } else {
+                        console.log(`\x1b[31m[hlb]\x1b[0m ⚠️  Aucun rapport trouvé pour la mission ${trimId} (ni en BD, ni en local).`);
+                    }
+                }
+            }
+        }
+
+
+        console.log(`\x1b[33m[hlb]\x1b[0m Récupération des infos de la mission ${challengeId}...`);
+        const mission = await getMissionDetails(challengeId);
+        if (!mission) {
+            console.error(`\x1b[31m[hlb] Impossible de trouver la mission ${challengeId}\x1b[0m`);
+            resolve();
+            return;
+        }
+
+        if (mission.view) {
+            delete mission.view;
+        }
+
+        let handoverSection = "";
+        if (linkedWriteups !== "") {
+            handoverSection = `\n2.5. ARCHIVES ET RENSEIGNEMENTS PRÉCÉDENTS (HANDOVER)\n\nVoici les rapports d'investigation de missions précédentes. Analyse-les rapidement avant de commencer. Les mots de passe, clés, IP ou noms trouvés dans ces rapports peuvent être la clé pour résoudre ta mission actuelle.\n${linkedWriteups}\n`;
+        }
+
+        // Le system_prompt est récupéré depuis la BD via l'API de licence
+        const basePrompt = config.system_prompt || '[ERREUR: system_prompt non chargé depuis la BD]';
+
+        // Injection dynamique des données mission et du handover dans le prompt
+        const promptTemplate = basePrompt
+            .replace('{{MISSION_JSON}}', JSON.stringify(mission, null, 2))
+            .replace('{{HANDOVER}}', handoverSection)
+            .replace('{{USERNAME}}', os.userInfo().username)
+            .replace('{{HOSTNAME}}', os.hostname());
+
+        if (!agentArgs.includes('--dangerously-skip-permissions')) {
+            agentArgs.push('--dangerously-skip-permissions');
+        }
+
+        const hasPromptArg = agentArgs.some(arg => arg.includes('{PROMPT}'));
+        const finalArgs = agentArgs.map(arg => arg.replace('{PROMPT}', promptTemplate));
+
+        console.log(`\x1b[33m[hlb]\x1b[0m Lancement de l'agent IA : ${agentCmd} ${agentArgs.join(' ')}`);
+        
+        const agent = spawn(agentCmd, finalArgs, {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            shell: false
+        });
+
+        // Gérer les erreurs si la commande n'existe pas ou crash
+        agent.on('error', (err) => {
+            console.error(`\x1b[31m[hlb]\x1b[0m Erreur au lancement de l'agent: ${err.message}`);
+            resolve();
+        });
+
+        // Empêcher le crash "write EPIPE" si l'agent ferme immédiatement son entrée standard
+        agent.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') {
+                console.error(`\x1b[31m[hlb]\x1b[0m Erreur d'entrée (stdin): ${err.message}`);
+            }
+        });
+
+        // Si le prompt n'a pas été passé en argument, on l'envoie sur l'entrée standard
+        if (!hasPromptArg) {
+            try {
+                agent.stdin.write(promptTemplate + '\n');
+            } catch (err) {
+                // L'erreur sera aussi attrapée par agent.stdin.on('error')
+            }
+        }
+
+        // Permettre à l'utilisateur d'interagir directement avec l'agent (pour coller le code d'auth par exemple)
+        rl.pause();
+        process.stdin.pipe(agent.stdin);
+
+        let isWriteupMode = false;
+        let writeupContent = "";
+
+        agent.stdout.on('data', async (data) => {
+            const output = data.toString();
+            // On écrit la sortie brute pour ne pas casser l'interface (spinners, couleurs)
+            process.stdout.write(data);
+
+            if (isWriteupMode) {
+                writeupContent += output;
+                if (output.includes('=== END WRITEUP ===')) {
+                    const filename = `Writeup_Mission_${challengeId}.md`;
+                    // 1. Sauvegarde locale
+                    fs.writeFileSync(filename, writeupContent);
+                    console.log(`\n\x1b[32m[hlb]\x1b[0m ✅ Writeup sauvegardé localement : ${filename}`);
+                    // 2. Sauvegarde en BD partagée
+                    const saved = await saveWriteupToDB(challengeId, mission, writeupContent);
+                    if (saved) {
+                        console.log(`\x1b[32m[hlb]\x1b[0m ✅ Writeup synchronisé en BD (disponible pour toute la team) !`);
+                    } else {
+                        console.log(`\x1b[33m[hlb]\x1b[0m ⚠️  BD non disponible — writeup conservé uniquement en local.`);
+                    }
+                    agent.kill();
+                    resolve();
+                }
+                return;
+            }
+
+            if (output.includes('=== BEGIN WRITEUP ===')) {
+                isWriteupMode = true;
+                writeupContent += output;
+                return;
+            }
+
+            const flagMatch = output.match(/\[SUBMIT_FLAG\]\s*([^\s]+)/);
+            if (flagMatch) {
+                const flag = flagMatch[1];
+                console.log(`\n\x1b[33m[hlb]\x1b[0m Flag intercepté : ${flag}. Vérification en cours...`);
+                const isCorrect = await apiSubmitFlag(challengeId, flag);
+
+                if (isCorrect) {
+                    console.log(`\x1b[32m[hlb]\x1b[0m ✅ FLAG CORRECT ! Demande du writeup à l'agent...`);
+                    agent.stdin.write('GENERATE_WRITEUP\n');
+                } else {
+                    console.log(`\x1b[31m[hlb]\x1b[0m ❌ FLAG INCORRECT.`);
+                    agent.stdin.write('FLAG_INCORRECT_TRY_AGAIN\n');
+                }
+            }
+        });
+
+        agent.stderr.on('data', (data) => {
+            process.stderr.write(`\x1b[31m[AGENT ERROR]\x1b[0m ${data}`);
+        });
+
+        agent.on('close', (code) => {
+            console.log(`\x1b[33m[hlb]\x1b[0m L'agent IA s'est terminé avec le code ${code}.`);
+            process.stdin.unpipe(agent.stdin);
+            rl.resume();
+            resolve();
+        });
+    });
+}
+
+function printHelp() {
+    console.log(`
+Commandes disponibles:
+  map                               Affiche toutes les missions
+  submit <id> <flag>                Soumet un flag pour une mission
+  agent <id> <commande> [args...]   Lance un agent IA pour résoudre la mission
+  help                              Affiche ce message d'aide
+  exit / quit                       Quitter l'outil interactif
+`);
+}
+
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: '\x1b[36mWhY_N07_Gh05T>\x1b[0m ' 
+});
+
+const figlet = require('figlet');
+
+const framesTexts = ["J4Y3", "4Y3J", "Y3J4", "3J4Y"];
+const colors = [
+    "\x1b[1;37m", // Blanc brillant
+    "\x1b[0;37m", // Gris clair
+    "\x1b[1;36m", // Cyan brillant
+    "\x1b[0;36m"  // Cyan
+];
+
+function rainbow(str) {
+    let result = '';
+    const lines = str.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+        const color = colors[i % colors.length];
+        result += color + lines[i] + '\x1b[0m\n';
+    }
+    return result;
+}
+
+async function getRankings() {
+    try {
+        const [resUser, resTeam] = await Promise.all([
+            fetch(`${URL}/api/v1/users/me`, { headers: getHeaders() }).then(r => r.json()),
+            fetch(`${URL}/api/v1/teams/me`, { headers: getHeaders() }).then(r => r.json())
+        ]);
+        return {
+            userRank: resUser.data && resUser.data.place ? resUser.data.place : '?',
+            userScore: resUser.data && resUser.data.score ? resUser.data.score : 0,
+            teamRank: resTeam.data && resTeam.data.place ? resTeam.data.place : '?',
+            teamScore: resTeam.data && resTeam.data.score ? resTeam.data.score : 0,
+        };
+    } catch (e) {
+        return { userRank: '?', userScore: 0, teamRank: '?', teamScore: 0 };
+    }
+}
+
+async function startShell() {
+    console.clear();
+    
+    if (!URL) URL = "https://ctf.hackerlab.bj";
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ÉTAPE 1 : VÉRIFICATION DE LICENCE
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (!LICENCE_KEY) {
+        console.log("\x1b[35m┌──────────────────────────────────────────────┐\x1b[0m");
+        console.log("\x1b[35m│    WhY_N07_Gh05T — Activation de licence       │\x1b[0m");
+        console.log("\x1b[35m└──────────────────────────────────────────────┘\x1b[0m\n");
+        const rlInit = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const ask = (q) => new Promise(resolve => rlInit.question(q, resolve));
+        LICENCE_KEY = await ask("Clé de licence (hlb-xxxx-xxxx-xxxx) : ");
+        rlInit.close();
+        LICENCE_KEY = LICENCE_KEY.trim();
+    }
+
+    // Vérification en ligne
+    process.stdout.write("\x1b[90mVérification de la licence...\x1b[0m\r");
+    const licResult = await verifyLicence(LICENCE_KEY);
+
+    if (!licResult.valid) {
+        console.log(`\n\x1b[31m╔══════════════════════════════════════════╗\x1b[0m`);
+        console.log(`\x1b[31m║  ✗  LICENCE INVALIDE OU EXPIRÉE           ║\x1b[0m`);
+        console.log(`\x1b[31m║  ${(licResult.error || '').padEnd(41)}║\x1b[0m`);
+        console.log(`\x1b[31m╚══════════════════════════════════════════╝\x1b[0m`);
+        process.exit(1);
+    }
+
+    // ✅ Licence valide — on sauvegarde et on charge la config depuis l'API
+    config.licence_key = LICENCE_KEY;
+    
+    // Récupérer le Personal Access Token CTF si pas encore renseigné
+    if (!API_TOKEN) {
+        const rlInit2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const ask2 = (q) => new Promise(resolve => rlInit2.question(q, resolve));
+        console.log(`\n\x1b[32m✅ Licence valide — Bienvenue ${licResult.owner} !\x1b[0m\n`);
+        API_TOKEN = await ask2("Clé d'accès CTF (Personal Access Token) : ");
+        config.token = API_TOKEN;
+        rlInit2.close();
+    }
+
+    // Récupérer la DATABASE_URL depuis la config API (si fournie par le serveur)
+    if (licResult.config && licResult.config.database_url && !DATABASE_URL) {
+        DATABASE_URL = licResult.config.database_url;
+        config.database_url = DATABASE_URL;
+    }
+
+    // Injecter le system_prompt depuis la BD (via l'API)
+    if (licResult.config && licResult.config.system_prompt) {
+        config.system_prompt = licResult.config.system_prompt;
+    }
+
+    if (licResult.config && licResult.config.ctf_url) {
+        URL = licResult.config.ctf_url;
+        config.url = URL;
+    }
+
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    console.clear();
+
+    try {
+        const asciiArt = figlet.textSync("WhY_N07_Gh05T", { font: 'Ghost' });
+        console.log(rainbow(asciiArt));
+    } catch (e) {
+        console.log("\x1b[35mWhY_N07_Gh05T\x1b[0m\n");
+    }
+    
+    console.log("\x1b[1mBienvenue dans le shell interactif WhY_N07_Gh05T.\x1b[0m");
+    console.log("Tapez 'help' pour voir la liste des commandes.");
+
+    process.stdout.write("\x1b[90mRécupération du classement en direct...\x1b[0m\r");
+    const stats = await getRankings();
+    
+    console.log(`\x1b[32m🏆 STATUT : Équipe #${stats.teamRank} (${stats.teamScore} pts)  |  Toi #${stats.userRank} (${stats.userScore} pts)\x1b[0m`);
+
+    // Statut de la BD partagée
+    const pool = await getDB();
+    if (pool) {
+        const count = await pool.query('SELECT COUNT(*) FROM writeups');
+        console.log(`\x1b[36m🗄️  BD Team : connectée — ${count.rows[0].count} writeup(s) partagé(s)\x1b[0m\n`);
+    } else {
+        console.log(`\x1b[33m🗄️  BD Team : non connectée (writeups locaux uniquement)\x1b[0m\n`);
+    }
+    
+    rl.setPrompt(`\x1b[36mWhY_N07_Gh05T \x1b[33m[#${stats.teamRank}]\x1b[36m>\x1b[0m `);
+    rl.prompt();
+}
+
+// Démarrer
+startShell();
+
+rl.on('line', async (line) => {
+    const args = line.trim().split(/\s+/);
+    const command = args[0].toLowerCase();
+
+    if (!command) {
+        rl.prompt();
+        return;
+    }
+
+    switch (command) {
+        case 'agent':
+            if (args.length < 3) {
+                console.error("Usage: agent <challenge_id> <chemin_vers_outil> [args...]");
+            } else {
+                const challengeId = parseInt(args[1]);
+                const agentCmd = args[2];
+                const agentArgs = args.slice(3);
+                
+                if (isNaN(challengeId)) {
+                    console.error("L'ID de la mission doit être un nombre.");
+                } else {
+                    await runAgent(challengeId, agentCmd, agentArgs);
+                }
+            }
+            break;
+        case 'submit':
+            if (args.length < 3) {
+                console.error("Usage: submit <challenge_id> <flag>");
+            } else {
+                const challengeId = parseInt(args[1]);
+                if (isNaN(challengeId)) {
+                    console.error("L'ID de la mission doit être un nombre.");
+                } else {
+                    const flag = args.slice(2).join(' ');
+                    await submitFlag(challengeId, flag);
+                }
+            }
+            break;
+        case 'map':
+            await mapMissions();
+            break;
+        case 'help':
+            printHelp();
+            break;
+        case 'exit':
+        case 'quit':
+        case 'q':
+            console.log("Fermeture de hlb. Bon piratage ! 👩‍💻👨‍💻");
+            process.exit(0);
+            break;
+        default:
+            console.error(`Commande inconnue: '${command}'. Tapez 'help' pour voir les options.`);
+            break;
+    }
+    
+    // Un petit délai pour laisser l'affichage asynchrone se terminer si nécessaire
+    setTimeout(() => {
+        rl.prompt();
+    }, 50);
+}).on('close', () => {
+    console.log("\nFermeture de hlb. Bon piratage ! 👩‍💻👨‍💻");
+    process.exit(0);
+});
