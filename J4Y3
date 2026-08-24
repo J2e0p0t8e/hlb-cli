@@ -453,6 +453,7 @@ Commandes disponibles:
   map                                       Affiche toutes les missions
   submit <id> <flag>                        Soumet un flag pour une mission
   agent <id> <commande> [args...]           Lance un agent IA pour résoudre la mission
+  change-key                                Réinitialise la clé de licence pour en entrer une nouvelle
   licence create <secret> <nom_du_pote>     [Admin] Génère une nouvelle clé de licence
   licence list <secret>                     [Admin] Liste toutes les licences et connexions
   licence revoke <secret> <cle_hlb>         [Admin] Révoque/Bloque une licence
@@ -529,10 +530,21 @@ async function startShell() {
     const licResult = await verifyLicence(LICENCE_KEY);
 
     if (!licResult.valid) {
+        // En cas de mauvaise clé, on purge immédiatement la clé locale
+        if (fs.existsSync(configPath)) {
+            try {
+                const cur = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                delete cur.licence_key;
+                fs.writeFileSync(configPath, JSON.stringify(cur, null, 2));
+            } catch(e) {
+                fs.unlinkSync(configPath);
+            }
+        }
         console.log(`\n\x1b[31m╔══════════════════════════════════════════╗\x1b[0m`);
         console.log(`\x1b[31m║  ✗  LICENCE INVALIDE OU EXPIRÉE           ║\x1b[0m`);
         console.log(`\x1b[31m║  ${(licResult.error || '').padEnd(41)}║\x1b[0m`);
-        console.log(`\x1b[31m╚══════════════════════════════════════════╝\x1b[0m`);
+        console.log(`\x1b[31m╚══════════════════════════════════════════╝\x1b[0m\n`);
+        console.log("Accès refusé. Veuillez relancer `hlb` avec une clé valide.");
         process.exit(1);
     }
 
@@ -640,15 +652,42 @@ rl.on('line', async (line) => {
         case 'map':
             await mapMissions();
             break;
+        case 'change-key':
+            if (fs.existsSync(configPath)) {
+                try {
+                    const cur = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                    delete cur.licence_key;
+                    fs.writeFileSync(configPath, JSON.stringify(cur, null, 2));
+                } catch(e) {
+                    fs.unlinkSync(configPath);
+                }
+            }
+            console.log("\x1b[32m[hlb]\x1b[0m Clé de licence réinitialisée. Relancez `hlb` pour entrer votre nouvelle clé.");
+            process.exit(0);
+            break;
         case 'licence':
-            if (args.length < 3) {
+            if (args.length < 2) {
+                console.error("Usage: licence <create|list|revoke|activate|change> [secret/args...]");
+            } else if (args[1].toLowerCase() === 'change') {
+                if (fs.existsSync(configPath)) {
+                    try {
+                        const cur = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                        delete cur.licence_key;
+                        fs.writeFileSync(configPath, JSON.stringify(cur, null, 2));
+                    } catch(e) {
+                        fs.unlinkSync(configPath);
+                    }
+                }
+                console.log("\x1b[32m[hlb]\x1b[0m Clé de licence réinitialisée. Relancez `hlb` pour entrer votre nouvelle clé.");
+                process.exit(0);
+            } else if (args.length < 3) {
                 console.error("Usage: licence <create|list|revoke|activate> <secret> [nom_du_pote|cle_hlb]");
             } else {
                 const subAction = args[1].toLowerCase();
                 const secret = args[2];
                 const target = args.slice(3).join(' ');
                 if (!['create', 'list', 'revoke', 'activate'].includes(subAction)) {
-                    console.error("Action inconnue. Choix possibles : create, list, revoke, activate");
+                    console.error("Action inconnue. Choix possibles : create, list, revoke, activate, change");
                 } else {
                     await handleAdminLicence(secret, subAction, target);
                 }
