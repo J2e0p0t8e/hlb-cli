@@ -351,6 +351,7 @@ async function runAgent(challengeId, agentCmd, agentArgs) {
         rl.pause();
         process.stdin.pipe(agent.stdin);
 
+        let isWriteupRequested = false;
         let isWriteupMode = false;
         let writeupContent = "";
 
@@ -359,7 +360,7 @@ async function runAgent(challengeId, agentCmd, agentArgs) {
             // On écrit la sortie brute pour ne pas casser l'interface (spinners, couleurs)
             process.stdout.write(data);
 
-            if (isWriteupMode) {
+            if (isWriteupRequested && isWriteupMode) {
                 writeupContent += output;
                 if (output.includes('=== END WRITEUP ===')) {
                     const filename = `Writeup_Mission_${challengeId}.md`;
@@ -379,7 +380,7 @@ async function runAgent(challengeId, agentCmd, agentArgs) {
                 return;
             }
 
-            if (output.includes('=== BEGIN WRITEUP ===')) {
+            if (isWriteupRequested && output.includes('=== BEGIN WRITEUP ===')) {
                 isWriteupMode = true;
                 writeupContent += output;
                 return;
@@ -393,6 +394,7 @@ async function runAgent(challengeId, agentCmd, agentArgs) {
 
                 if (isCorrect) {
                     console.log(`\x1b[32m[hlb]\x1b[0m ✅ FLAG CORRECT ! Demande du writeup à l'agent...`);
+                    isWriteupRequested = true;
                     agent.stdin.write('GENERATE_WRITEUP\n');
                 } else {
                     console.log(`\x1b[31m[hlb]\x1b[0m ❌ FLAG INCORRECT.`);
