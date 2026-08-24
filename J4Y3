@@ -557,8 +557,8 @@ async function startShell() {
         config.token = API_TOKEN.trim();
     }
 
-    // Récupérer la DATABASE_URL depuis la config API (si fournie par le serveur)
-    if (licResult.config && licResult.config.database_url && !DATABASE_URL) {
+    // Récupérer la DATABASE_URL depuis la config API
+    if (licResult.config && licResult.config.database_url) {
         DATABASE_URL = licResult.config.database_url;
         config.database_url = DATABASE_URL;
     }
